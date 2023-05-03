@@ -1,0 +1,1915 @@
+---
+title: "BT2103–Project"
+output: pdf_document
+date: "2022-10-21"
+---
+
+```{r package, message = F}
+library(dplyr)
+library(ROSE) # Random OS, US, SMOTE
+library(mlbench)
+library(caret)
+library(Boruta)
+library(varImp)
+library(tidyverse)
+library(reshape2)
+library(ggplot2)
+library(e1071)
+library(caTools)
+library(ROCR) 
+library(naniar) # for missing values
+library(plyr)
+library(corrplot)
+```
+
+```{r preamble}
+set.seed(1234)
+card <- read.csv("~/Downloads/card.csv", skip = 1)
+```
+### Exploratory Data Analysis
+
+```{r load and view data}
+data <- read.table("card.csv", sep = ",", skip = 1, header=T)
+#view first 6 rows of dataset
+head(data)
+#vis_miss(data)
+```
+
+```{r percent of default by sex}
+data$DEFAULT = as.factor(data$default.payment.next.month)
+data$GENDER <- ifelse(data$SEX==1, "Male", "Female")
+ggplot(data = data, mapping = aes(x = GENDER, fill = DEFAULT)) +
+  geom_bar() +
+  ggtitle("Gender") +
+  stat_count(aes(label = ..count..), geom = "label")
+```
+
+```{r percent of default by education}
+#Merging 0, 5 and 6 to 4(others)
+data$EDUCATION = ifelse(data$EDUCATION == 0 |data$EDUCATION == 5 | data$EDUCATION == 6, 4, data$EDUCATION)
+#Converting EDUCATION to a categorical variable
+data$EDUCATION = as.factor(data$EDUCATION)
+#Plotting Bar graph for EDUCATION
+ggplot(data = data, mapping = aes(x = EDUCATION, fill = DEFAULT)) +
+  geom_bar() +
+  ggtitle("EDUCATION") +
+  stat_count(aes(label = ..count..), geom = "label")
+```
+
+```{r calDefaultPerc}
+calDefaultPerc = function(x, colInd, data.level){
+  default_count = c()
+  default_perc = c()
+  
+  for (i in 1:length(data.level)) {
+    print("start of for...")
+    total_count = count(x[x[colInd] == data.level[i], ], vars = "DEFAULT")
+    count_def = total_count[total_count$DEFAULT == 1, 2]
+    total = total_count[total_count$DEFAULT == 1, 2] + total_count[total_count$DEFAULT == 0, 2]
+    print(i)
+    perc = round(count_def/total * 100, digits = 2)
+    
+    default_count = c(default_count, count_def)
+    default_perc = c(default_perc, perc)
+    print("end of for...")
+  }
+  print("outer for....")
+  #data.level
+  length(default_count)
+  length(default_perc)
+  
+  paste("data.level: ", length(data.level))
+  paste("default_count: ", length(default_count))
+  paste("default_perc: ", length(default_perc))
+  
+  default_perc_df = data.frame(level = data.level, default.count = default_count,
+                               percentage = default_perc)
+  print("data frame created....")
+  return(default_perc_df)
+}
+```
+
+```{r education vs default}
+default_count_perc = calDefaultPerc(x = data, colInd = 4, 
+                                    data.level = levels(data$EDUCATION))
+# Bar Graph
+ggplot(data = default_count_perc, mapping = aes(x = reorder(level, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = "#b3e569") +
+  coord_flip() +
+  xlab("Education") +
+  ylab("Percentage of Defaulters") +
+  ggtitle("Education Level vs Default") +
+  geom_label(label = paste(default_count_perc$percentage, "%"))
+```
+
+```{r education and credit limits}
+ggplot(data, aes(x=as.factor(EDUCATION), y=LIMIT_BAL)) + geom_boxplot(fill="slateblue", alpha=0.2) + xlab("Education Level")
+```
+
+```{r marriage}
+# Adding one feature marital status
+addMaritalStatus = function(x, colInd, newColInd){
+  for (i in 1: nrow(x)) {
+    if(x[i, colInd] == 1){
+      x[i, newColInd] = "Married"
+    }
+    else if (x[i, colInd] == 2) {
+      x[i, newColInd] = "Not Married"
+    }
+    else{
+      x[i, newColInd] = "Others"
+    }
+                                                                                                                                                                                              
+  }
+  return(x)
+}
+```
+
+```{r marriage}
+# Merging 0 to 3(others)
+data$MARRIAGE = ifelse(data$MARRIAGE == 3, 0, data$MARRIAGE)
+data$MARRIAGE = as.factor(data$MARRIAGE)
+table(data$MARRIAGE)
+data$MARITALSTATUS = NA
+data = addMaritalStatus(data, which(colnames(data) == "MARRIAGE"), 
+                            which(colnames(data) == "MARITALSTATUS"))
+# convert to categorical data
+data$MARITALSTATUS = as.factor(data$MARITALSTATUS)
+
+# Bar graph for marital status
+ggplot(data = data, mapping = aes(x = MARITALSTATUS, fill = DEFAULT)) +
+  geom_bar() +
+  xlab("Marital status") +
+  ggtitle(" Defaulters on Marital Status") +
+  stat_count(aes(label = ..count..), geom = "label")
+```
+
+```{r marital status}
+# Explore Marital status vs default
+marital_default_per_df = calDefaultPerc(x = data, 
+                                           colInd = which(colnames(data) == "MARITALSTATUS"), 
+                                           data.level = levels(data$MARITALSTATUS))
+marital_default_per_df
+
+# Bar Graph
+ggplot(data = marital_default_per_df, mapping = aes(x = reorder(level, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = "#0000FF") +
+  coord_flip() +
+  xlab("Marital Status") +
+  ylab("Percentage of Defaulters") +
+  ggtitle("Marital Status vs Default") +
+  geom_label(label = paste(marital_default_per_df$percentage, "%"))
+```
+
+```{r age}
+data1 = data %>% 
+  mutate(
+    # Create categories
+    age_group = dplyr::case_when(
+      AGE <= 30            ~ "20-30",
+      AGE > 30 & AGE <= 40 ~ "30-40",
+      AGE > 40 & AGE <= 50 ~ "40-50",
+      AGE > 50 & AGE <= 60 ~ "50-60",
+      AGE > 60 & AGE <= 70 ~ "60-70",
+      AGE > 70 & AGE <= 80 ~ "70-80"
+    ),
+    # Convert to factor
+    age_group = factor(
+      age_group,
+      level = c("20-30", "30-40","40-50", "50-60", "60-70", "70-80")
+    )
+  )
+data1$age_group = as.factor(data1$age_group)
+levels(data1$age_group)
+age_default_per_df = calDefaultPerc(x = data1, 
+                                           colInd = which(colnames(data1) == "age_group"), 
+                                           data.level = levels(data1$age_group))
+age_default_per_df
+# Bar Graph
+ggplot(data = age_default_per_df, mapping = aes(x = reorder(level, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = "#0000FF") +
+  coord_flip() +
+  xlab("Age Group") +
+  ylab("Percentage of Defaulters") +
+  ggtitle("Age Group vs Default") +
+  geom_label(label = paste(age_default_per_df$percentage, "%"))
+```
+
+```{r correlation plot}
+
+dataset = data = mutate_all(testset, function(x) as.numeric(as.character(x)))
+data.cor = cor(dataset) 
+table(data.cor)
+corrplot(data.cor, tl.srt = 60,tl.cex = 0.5,method = "number",number.cex=0.3)
+
+pay1 = cor.test(dataset$DEFAULT_PAYMENT,dataset$PAY_1,method ="pearson")
+pay2 = cor.test(dataset$DEFAULT_PAYMENT,dataset$PAY_2,method ="pearson")
+pay3 = cor.test(dataset$DEFAULT_PAYMENT,dataset$PAY_3,method ="pearson")
+pay4 = cor.test(dataset$DEFAULT_PAYMENT,dataset$PAY_4,method ="pearson")
+pay5 = cor.test(dataset$DEFAULT_PAYMENT,dataset$PAY_5,method ="pearson")
+pay6 = cor.test(dataset$DEFAULT_PAYMENT,dataset$PAY_6,method ="pearson")
+
+tab <- matrix(c(pay1$estimate,pay2$estimate,pay3$estimate,pay4$estimate,pay5$estimate,pay6$estimate), nrow = 1)
+colnames(tab) <- c("Pay_1", "Pay_2","Pay_3","Pay_4","Pay_5","Pay_6")
+rownames(tab) <- c("Default Payment")
+tab.final <- as.table(tab)
+kable(tab.final) %>% kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+
+### Data pre-processing
+```{r process1}
+card <- card[, c(-1)]
+```
+Drop the 'ID' column as it is not needed inside our prediction.
+
+```{r process2}
+colnames(card)[colnames(card) == "PAY_0"] ="PAY_1"
+```
+We will change the column name of "PAY_O" to "PAY_1" to make the naming convention consistent with BILL_AMT and PAY_AMT.
+
+```{r process3}
+table(card$EDUCATION)
+card[card$EDUCATION %in% c(0, 5, 6), "EDUCATION"] <- 4
+```
+Based on the documentation of the data set, the values of 0, 5, 6 in EDUCATION column are unknown / undocumented, so we can move it to "OTHERS" (denoted by 4).
+
+```{r process4}
+table(card$MARRIAGE)
+card[card$MARRIAGE == 0, "MARRIAGE"] <- 3
+```
+Based on the documentation of the data set, the values of 0 in MARRIAGE column are unknown / undocumented, so we can move it to "OTHERS" (denoted by 3).
+
+```{r process5}
+colnames(card)[colnames(card) == "default.payment.next.month"] ="DEFAULT_PAYMENT"
+```
+We change the column name for readability purpose.
+
+### Split train:test to 75:25
+```{r data split}
+set.seed(1234)
+index <- 1:nrow(card)
+n = length(card$LIMIT_BAL)
+testindex <- sample(index, trunc(n)/4)
+testset <- card[testindex,]
+trainset <- card[-testindex,]
+```
+
+```{r process6}
+# Convert the categorical as factor
+trainset <- trainset %>% mutate_at(c("SEX", "EDUCATION", "MARRIAGE", "PAY_1", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6", "DEFAULT_PAYMENT"), as.factor)
+```
+Change all categorical variables into factor variables.
+
+```{r process7}
+trainset <- trainset %>%
+    mutate_at(c("LIMIT_BAL", "AGE", "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6", "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"), scale)
+
+trainset <- trainset %>%
+    mutate_at(c("LIMIT_BAL", "AGE", "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6", "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"), as.numeric)
+```
+
+```{r process8}
+# Convert the categorical as factor
+testset <- testset %>% mutate_at(c("SEX", "EDUCATION", "MARRIAGE", "PAY_1", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6", "DEFAULT_PAYMENT"), as.factor)
+```
+Change all categorical variables into factor variables.
+
+```{r process9}
+testset <- testset %>%
+    mutate_at(c("LIMIT_BAL", "AGE", "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6", "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"), scale)
+
+testset <- testset %>%
+    mutate_at(c("LIMIT_BAL", "AGE", "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6", "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"), as.numeric)
+```
+
+```{r hist-bill_amt}
+jpeg("~/Documents/rplot.jpg")
+hist(card$BILL_AMT1, main = "Histogram of BILL_AMT1", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot1.jpg")
+hist(card$BILL_AMT2, main = "Histogram of BILL_AMT2", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot2.jpg")
+hist(card$BILL_AMT3, main = "Histogram of BILL_AMT3", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot3.jpg")
+hist(card$BILL_AMT4, main = "Histogram of BILL_AMT4", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot4.jpg")
+hist(card$BILL_AMT5, main = "Histogram of BILL_AMT5", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot5.jpg")
+hist(card$BILL_AMT6, main = "Histogram of BILL_AMT6", xlab = "Amount ($)")
+dev.off()
+```
+```{r hist-bill_amt}
+jpeg("~/Documents/rplot.jpg")
+hist(card$PAY_AMT1, main = "Histogram of PAY_AMT1", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot1.jpg")
+hist(card$PAY_AMT2, main = "Histogram of PAY_AMT2", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot2.jpg")
+hist(card$PAY_AMT3, main = "Histogram of PAY_AMT3", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot3.jpg")
+hist(card$PAY_AMT4, main = "Histogram of PAY_AMT4", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot4.jpg")
+hist(card$PAY_AMT5, main = "Histogram of PAY_AMT5", xlab = "Amount ($)")
+dev.off()
+jpeg("~/Documents/rplot5.jpg")
+hist(card$PAY_AMT6, main = "Histogram of PAY_AMT6", xlab = "Amount ($)")
+dev.off()
+```
+
+```{r process10}
+levels(trainset$PAY_1) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(trainset$PAY_2) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(trainset$PAY_3) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(trainset$PAY_4) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(trainset$PAY_5) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(trainset$PAY_6) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+
+
+levels(testset$PAY_1) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(testset$PAY_2) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(testset$PAY_3) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(testset$PAY_4) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(testset$PAY_5) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+levels(testset$PAY_6) <- c("-2", "-1", "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8" )
+```
+
+
+```{r fs2}
+boruta_output <- Boruta(DEFAULT_PAYMENT ~ ., data=trainset, doTrace=0)  
+
+# Do a tentative rough fix
+roughFixMod <- TentativeRoughFix(boruta_output)
+boruta_signif <- getSelectedAttributes(roughFixMod)
+
+imps <- attStats(roughFixMod)
+imps2 = imps[imps$decision != 'Rejected', c('meanImp', 'decision')]
+head(imps2[order(-imps2$meanImp), ])  # descending sort
+
+jpeg("~/Documents/boruta.jpg")
+plot(boruta_output, cex.axis=.7, las=2, xlab="", main="Variable Importance") 
+dev.off
+```
+
+
+Based on the robuta feature selection algorithm, we will implement cutoff of 30. So we would select PAY_1, PAY_2, BILL_AMT4, BILL_AMT3, PAY_3, BILL_AMT2, PAY_4, BILL_AMT6, & PAY_6.
+
+### Train data resampling
+We do resampling after feature selection as the documentation for SMOTE recommends doing feature selection before resampling. 
+
+```{r undersampling}
+data_balanced_under<- ovun.sample(DEFAULT_PAYMENT ~ ., data = trainset, method = "under", seed = 1234)$data
+table(data_balanced_under$DEFAULT_PAYMENT)
+```
+
+```{r synthetic}
+data.rose <- ROSE(DEFAULT_PAYMENT ~ ., data = trainset, seed = 1234)$data
+table(data.rose$DEFAULT_PAYMENT)
+```
+### Machine learning models (SVM)
+```{r svm-vanilla}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = trainset, type="C-classification", kernel = "linear", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-undersampling}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data_balanced_under, type="C-classification", kernel = "linear", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-synthetic}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data.rose, type="C-classification", kernel = "linear", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-vanilla-polynomial}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = trainset, type="C-classification", kernel = "polynomial", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-undersampling-polynomial}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data_balanced_under, type="C-classification", kernel = "polynomial", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-synthetic-polynomial}
+library(e1071)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data.rose, type="C-classification", kernel = "polynomial", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-vanilla-radial}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = trainset, type="C-classification", kernel = "radial", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-undersampling-radial}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data_balanced_under, type="C-classification", kernel = "radial", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-synthetic-radial}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data.rose, type="C-classification", kernel = "radial", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-vanilla-sigmoid}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = trainset, type="C-classification", kernel = "sigmoid", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-undersampling-sigmoid}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data_balanced_under, type="C-classification", kernel = "sigmoid", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r svm-synthetic-sigmoid}
+library(e1071)
+set.seed(1234)
+svm.model <- svm(as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, data = data.rose, type="C-classification", kernel = "sigmoid", cross = 5)
+summary(svm.model)
+results_test <- predict(svm.model, testset[,-24] )
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Validation Accuracy", svm.model$tot.accuracy)
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (Logistic Regression)
+
+```{r logit-vanilla}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+logit <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainset, 
+        
+        # `rf` method for random forest
+        method='glmnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        family = 'binomial',
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(logit, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(logit$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r logit-undersampling}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+logit <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under, 
+        
+        # `rf` method for random forest
+        method='glmnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        family = 'binomial',
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(logit, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(logit$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r logit-synthetic}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+logit <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data.rose, 
+        
+        # `rf` method for random forest
+        method='glmnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        family = 'binomial',
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(logit, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(logit$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (Neural Network)
+
+```{r neural network-vanilla, warning=FALSE, fig.width = 20, fig.height = 20}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+nn <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainset, 
+        
+        # `rf` method for random forest
+        method='nnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(nn, testset[,-24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(nn$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r neural network-undersampling, warning=FALSE, fig.width = 20, fig.height = 20}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+nn <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under, 
+        
+        # `rf` method for random forest
+        method='nnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(nn, testset[,-24])
+
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(nn$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r neural network-synthetic, warning=FALSE, fig.width = 20, fig.height = 20}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+nn <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data.rose, 
+        
+        # `rf` method for random forest
+        method='nnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(nn, testset[,-24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(nn$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (Naive Bayes)
+
+```{r naive-bayes, warnings = FALSE, message=FALSE}
+set.seed(1234)
+model = train(trainset[c(1, 6:11, 13:17, 18:22)], trainset$DEFAULT_PAYMENT,'nb',trControl=trainControl(method='cv',number=5))
+results_test <- predict(model$finalModel, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test$class))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(model$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r naive-bayes-undersampling, warnings = FALSE, message=FALSE}
+set.seed(1234)
+model = train(data_balanced_under[c(1, 6:11, 13:17, 18:22)], data_balanced_under$DEFAULT_PAYMENT,'nb',trControl=trainControl(method='cv',number=5))
+results_test <- predict(model$finalModel, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test$class))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(model$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r naive-bayes-rose, warnings = FALSE, message=FALSE}
+set.seed(1234)
+model = train(data.rose[c(1, 6:11, 13:17, 18:22)], data.rose$DEFAULT_PAYMENT,'nb',trControl=trainControl(method='cv',number=5))
+results_test <- predict(model$finalModel, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test$class))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(model$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (Random Forest)
+
+```{r random forest-vanilla}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+forest <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainset, 
+        
+        # `rf` method for random forest
+        method='rf', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(forest, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(forest$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r random forest-undersampling}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+forest <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under, 
+        
+        # `rf` method for random forest
+        method='rf', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(forest, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(forest$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r random forest-synthetic}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+forest <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data.rose, 
+        
+        # `rf` method for random forest
+        method='rf', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(forest, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(forest$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (Decision Tree)
+
+```{r decision tree- original}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+df <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainset, 
+        
+        # `rf` method for random forest
+        method='rpart', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(df, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(df$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+library(rattle)
+jpeg("~/Documents/df_original.jpg")
+fancyRpartPlot(df$finalModel)
+dev.off()
+```
+
+```{r decision tree-undersampling}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+df <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under, 
+        
+        # `rf` method for random forest
+        method='rpart', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(df, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(df$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+library(rattle)
+jpeg("~/Documents/df_us.jpg")
+fancyRpartPlot(df$finalModel)
+dev.off()
+```
+
+```{r decision tree-synthetic}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+df <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data.rose, 
+        
+        # `rf` method for random forest
+        method='rpart', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy')
+results_test <- predict(df, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(df$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+jpeg("~/Documents/df_rose.jpg")
+fancyRpartPlot(df$finalModel)
+dev.off()
+```
+
+### Machine learning models (XGBoost)
+
+```{r xgb-vanilla}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+xgb <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainset, 
+        
+        # `rf` method for random forest
+        method='xgbTree', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(xgb, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(xgb$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r xgb-undersampling}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+xgb <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under, 
+        
+        # `rf` method for random forest
+        method='xgbTree', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(xgb, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(xgb$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r xgb-synthetic}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+xgb <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data.rose, 
+        
+        # `rf` method for random forest
+        method='xgbTree', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(xgb, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(xgb$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (ADABoost)
+
+```{r ada-encoding}
+library(mltools)
+library(data.table)
+trainset_ada <- trainset[c(1, 6:11, 13:17, 18:22)]
+dummy <- dummyVars(" ~ .", data=trainset_ada)
+
+#perform one-hot encoding on data frame
+trainset_ada <- data.frame(predict(dummy, newdata=trainset_ada))
+trainset_ada$DEFAULT_PAYMENT <- trainset$DEFAULT_PAYMENT
+
+data_balanced_under_ada <- data_balanced_under[c(1, 6:11, 13:17, 18:22)]
+dummy <- dummyVars(" ~ .", data=data_balanced_under_ada)
+
+#perform one-hot encoding on data frame
+data_balanced_under_ada <- data.frame(predict(dummy, newdata=data_balanced_under_ada))
+data_balanced_under_ada$DEFAULT_PAYMENT <- data_balanced_under$DEFAULT_PAYMENT
+
+data.rose_ada <- data.rose[c(1, 6:11, 13:17, 18:22)]
+dummy <- dummyVars(" ~ .", data=data.rose_ada)
+
+#perform one-hot encoding on data frame
+data.rose_ada <- data.frame(predict(dummy, newdata=data.rose_ada))
+data.rose_ada$DEFAULT_PAYMENT <- data.rose$DEFAULT_PAYMENT
+
+testset_ada <- testset[c(1, 6:11, 13:17, 18:22)]
+dummy <- dummyVars(" ~ .", data=testset_ada)
+
+#perform one-hot encoding on data frame
+testset_ada <- data.frame(predict(dummy, newdata=testset_ada))
+testset_ada$DEFAULT_PAYMENT <- testset$DEFAULT_PAYMENT
+```
+
+```{r ada-vanilla}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+ada <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ ., 
+        
+        # Source of data; remove the Species variable
+        data=trainset_ada, 
+        
+        # `rf` method for random forest
+        method='ada', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(ada, testset_ada)
+cm <- as.matrix(table(Actual = testset_ada$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(ada$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r ada-undersampling}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+ada <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ ., 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under_ada, 
+        
+        # `rf` method for random forest
+        method='ada', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(ada, testset_ada)
+cm <- as.matrix(table(Actual = testset_ada$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(ada$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r ada-synthetic}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+ada <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ ., 
+        
+        # Source of data; remove the Species variable
+        data=data.rose_ada, 
+        
+        # `rf` method for random forest
+        method='ada', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(ada, testset_ada)
+cm <- as.matrix(table(Actual = testset_ada$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(ada$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+### Machine learning models (LightGBM)
+
+
+```{r gbm-vanilla}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+gbm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainset, 
+        
+        # `rf` method for random forest
+        method="gbm", 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(gbm, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(gbm$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r gbm-undersampling}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+gbm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data_balanced_under, 
+        
+        # `rf` method for random forest
+        method="gbm", 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(gbm, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(gbm$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+
+```{r gbm-synthetic}
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5)
+gbm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=data.rose, 
+        
+        # `rf` method for random forest
+        method="gbm", 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        
+        # Accuracy to measure the performance of the model
+        metric='Accuracy', verbose = 0)
+results_test <- predict(gbm, testset[, -24])
+cm <- as.matrix(table(Actual = testset$DEFAULT_PAYMENT, Predicted = results_test))
+paste("Accuracy:", sum(diag(cm)) / sum(cm) * 100)
+paste("Validation Accuracy:", mean(gbm$results$Accuracy) * 100)
+paste("Recall:", cm[2, 2] / (cm[2,1] + cm[2,2]) * 100)
+paste("Precision:", cm[2, 2] / (cm[1, 2] + cm[2,2]) * 100)
+paste("Arithmetic Avg:", ((cm[1,1] / (cm[1,1] + cm[1, 2])) + (cm[2,2] / (cm[2, 1] + cm[2, 2]))) * 50)
+paste("Harmonic Avg:", 1/(0.5 * (((cm[1, 1] + cm[1, 2]) / cm[1, 1]) + ((cm[2, 1] + cm[2, 2]) / cm[2, 2])))* 100) 
+paste("F1-Score:", (cm[2, 2] / (cm[2, 2] + 0.5*(cm[1, 2] + cm[2, 1]))) * 100)
+paste("ROC Index:", ((cm[2, 2] / (cm[2, 1] + cm[2, 2])) + (cm[1, 1] / (cm[1, 1] + cm[1, 2]))) / 2 * 100)
+```
+### ROC
+```{r pre-roc-vanilla}
+trainsets <- trainset
+levels(trainsets$SEX) <- c("one",  "two")
+levels(trainsets$EDUCATION) <- c("one",  "two",  "three",  "four")
+levels(trainsets$MARRIAGE) <- c("one",  "two",  "three")
+levels(trainsets$PAY_1) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_2) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_3) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_4) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_5) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_6) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$DEFAULT_PAYMENT) <- c("zero",  "one")
+```
+
+```{r roc-vanilla}
+# SVM
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+svm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='svmLinear', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+# LOGIT
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+logit <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='glmnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        family = 'binomial',
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+# NN
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+nn <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='nnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# Naive Bayes
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+nb <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='nb', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# RF
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+rf <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='rf', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# DT
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+dt <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='rpart', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# XGBoost
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+xg <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='xgbTree', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# ADA
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+ada <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='ada', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# lightgbm
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+gbm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='gbm', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+library(MLeval)
+res <- evalm(list(svm, logit, nn, nb, rf, dt, xg, ada, gbm),gnames=c('svm', 'logistic regression', 'neural network', 'naive bayes', 'random forest', 'decision tree', 'xgboost', 'adaboost', 'lightgbm'))
+```
+```{r save-roc-vanilla}
+jpeg("~/Documents/roc-vanilla.jpg")
+res$roc
+dev.off()
+```
+
+```{r pre-roc-undersampling}
+trainsets <- data_balanced_under
+levels(trainsets$SEX) <- c("one",  "two")
+levels(trainsets$EDUCATION) <- c("one",  "two",  "three",  "four")
+levels(trainsets$MARRIAGE) <- c("one",  "two",  "three")
+levels(trainsets$PAY_1) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_2) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_3) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_4) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_5) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_6) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$DEFAULT_PAYMENT) <- c("zero",  "one")
+```
+
+```{r roc-undersampling}
+# SVM
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+svm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='svmRadial', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+# LOGIT
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+logit <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='glmnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        family = 'binomial',
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+# NN
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+nn <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='nnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# Naive Bayes
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+nb <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='nb', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# RF
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+rf <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='rf', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# DT
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+dt <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='rpart', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# XGBoost
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+xg <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='xgbTree', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# ADA
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+ada <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='ada', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# lightgbm
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+gbm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='gbm', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+library(MLeval)
+res <- evalm(list(svm, logit, nn, nb, rf, dt, xg, ada, gbm),gnames=c('svm', 'logistic regression', 'neural network', 'naive bayes', 'random forest', 'decision tree', 'xgboost', 'adaboost', 'lightgbm'))
+```
+
+```{r save-roc-undersampling}
+jpeg("~/Documents/roc-undersampling.jpg")
+res$roc
+dev.off()
+```
+
+```{r pre-roc-rose}
+trainsets <- data.rose
+levels(trainsets$SEX) <- c("one",  "two")
+levels(trainsets$EDUCATION) <- c("one",  "two",  "three",  "four")
+levels(trainsets$MARRIAGE) <- c("one",  "two",  "three")
+levels(trainsets$PAY_1) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_2) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_3) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_4) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_5) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$PAY_6) <- c("minustwo", "minusone", "zero",  "one",  "two",  "three",  "four",  "five",  "six",  "seven",  "eight" )
+levels(trainsets$DEFAULT_PAYMENT) <- c("zero",  "one")
+```
+
+```{r roc-rose}
+# SVM
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+svm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='svmRadial', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+# LOGIT
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+logit <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='glmnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        family = 'binomial',
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+# NN
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+nn <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='nnet', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# Naive Bayes
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+nb <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='nb', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# RF
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+rf <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='rf', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# DT
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+dt <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='rpart', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# XGBoost
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+xg <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='xgbTree', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# ADA
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+ada <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='ada', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+
+# lightgbm
+set.seed(1234)
+repeat_cv <- trainControl(method='cv', number=5, summaryFunction=twoClassSummary, classProbs=T, savePredictions = T)
+gbm <- train(
+        
+        # Formula. We are using all variables to predict Species
+        as.factor(DEFAULT_PAYMENT) ~ PAY_1 + PAY_2 + BILL_AMT4 + BILL_AMT3 + BILL_AMT2 + BILL_AMT5 + PAY_6 + PAY_3 + PAY_4 + BILL_AMT6 + PAY_AMT1 + PAY_AMT3 + PAY_5 + PAY_AMT5 + PAY_AMT2 + PAY_AMT4 + LIMIT_BAL, 
+        
+        # Source of data; remove the Species variable
+        data=trainsets, 
+        
+        # `rf` method for random forest
+        method='gbm', 
+        
+        # Add repeated cross validation as trControl
+        trControl=repeat_cv,
+        # Accuracy to measure the performance of the model
+        metric='ROC')
+library(MLeval)
+res <- evalm(list(svm, logit, nn, nb, rf, dt, xg, ada, gbm),gnames=c('svm', 'logistic regression', 'neural network', 'naive bayes', 'random forest', 'decision tree', 'xgboost', 'adaboost', 'lightgbm'))
+```
+
+```{r save-roc-rose}
+jpeg("~/Documents/roc-rose.jpg")
+res$roc
+dev.off()
+```
